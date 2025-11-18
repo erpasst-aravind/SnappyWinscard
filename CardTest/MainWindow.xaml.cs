@@ -2,11 +2,17 @@
 using System;
 using System.Globalization;
 using System.Linq;
+using System.Runtime.Remoting.Messaging;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
+using System.Windows.Forms;
+using static GRGlibHF.MainWindow;
+using TextBox = System.Windows.Controls.TextBox;
 
-namespace CardTest
+namespace GRGlibHF
 {
     public partial class MainWindow : Window
     {
@@ -26,21 +32,114 @@ namespace CardTest
             BindingOperations.EnableCollectionSynchronization(CardIo.Devices, lock1);
             CardIo.ReaderStateChanged += CardIo_ReaderStateChanged;
             ConnectCard1();
+            Task.Run(() => ReadCardsLoop());
         }
 
         public CardIo CardIo { get; set; }
+        private bool _run = true;
+
+
+        private void ReadCardsLoop()
+        {
+            while (_run)
+            {
+                try
+                {
+                    string cardUID = CardIo.GetCardUID();
+
+                    if (!string.IsNullOrWhiteSpace(cardUID))
+                    {
+                        // Normalize UID
+                        cardUID = cardUID.Replace("-", string.Empty).ToUpper();
+
+                        // Skip if same card as last time
+                        if (cardUID == _lastUid)
+                        {
+                            Thread.Sleep(200);
+                            continue;
+                        }
+
+                        _lastUid = cardUID;
+
+                        var retSt = calcDevNo(cardUID);
+
+                        System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                        {
+                            if (retSt.value != null)
+                            {
+                                DisplayStatus($"Card-UID: {retSt.value}");
+                                SendKeys.SendWait(retSt.value + "{ENTER}");
+                            }
+                            else
+                            {
+                                DisplayStatus();
+                            }
+                        });
+
+                        Thread.Sleep(500); // throttle reads
+                    }
+                    else
+                    {
+                        // If no card present, clear the last UID so the next card is detected again
+                        _lastUid = "";
+                        Thread.Sleep(200);
+                    }
+                }
+                catch
+                {
+                    Thread.Sleep(200);
+                }
+            }
+        }
+
+
+        private string _lastUid = "";
 
         private void ButtonGetUid_Click(object sender, RoutedEventArgs e)
         {
-            string cardUID = CardIo.GetCardUID();
-            if (cardUID == null)
+            retSts retSt = new retSts();
+            string cardUID = string.Empty;
+            cardUID = CardIo.GetCardUID();
+            if (cardUID != null)
             {
-                DisplayStatus();
+                // Convert the first 4 bytes of the received UID to a hexadecimal string
+                cardUID = cardUID.Replace("-", string.Empty).ToUpper();
+
+                retSt = calcDevNo(cardUID);
+                if (cardUID == null)
+                {
+                    DisplayStatus();
+                }
+                else
+                {
+                    DisplayStatus($"Card-UID: {retSt.value}"); //displaying on text block
+                }
+                SendKeys.SendWait(retSt.value + "{ENTER}");
             }
-            else
+        }
+        public static retSts calcDevNo(string csn)
+        {
+            retSts retSt = new retSts();
+            retSt.sts = false;
+            retSt.value = "Error";
+            try
             {
-                DisplayStatus($"Card-UID: {cardUID}"); //displaying on text block
+                string rotateCsn = csn.Substring(6, 2) + csn.Substring(4, 2) + csn.Substring(2, 2) + csn.Substring(0, 2);
+                long decValue = Convert.ToInt64(rotateCsn, 16);
+                retSt.value = decValue.ToString();
+                retSt.sts = true;
             }
+            catch (Exception e)
+            {
+                retSt.value = e.ToString();
+            }
+            return retSt;
+        }
+
+        public struct retSts
+        {
+            public bool sts;
+            public string value;
         }
 
         private bool ConnectCard1()
@@ -62,245 +161,15 @@ namespace CardTest
 
         private enum TextFormat { Hex, Normal, Stretched }
 
-        private byte[] Key
-        {
-            get
-            {
-                return GetBytes(toggleHexKey.IsChecked == true, textBoxKey, 6);
-            }
-        }
+        
 
-        private byte Block
-        {
-            get
-            {
-                if (byte.TryParse(textBoxBlock.Text, out var b)
-                    && b > 0
-                    && b <= 63)
-                    return b;
-                textBlockSubStatus.Text = "Please enter a Block No from 0 to 63";
-                throw new ArgumentException();
-            }
-        }
-
-        private byte KeyType => toggleKeyTypeB.IsChecked == true ? (byte)0x61 : (byte)0x60;
-        private byte KeySlot => toggleKeySlot1.IsChecked == true ? (byte)0x1 : (byte)0x0;
-
-        private byte[] Data
-        {
-            get
-            {
-                return GetBytes(toggleHexData.IsChecked == true, textBoxData, 16);
-            }
-
-            set
-            {
-                SetBytes(value, toggleHexData.IsChecked == true ? TextFormat.Hex : TextFormat.Normal, textBoxData);
-            }
-        }
-
-
-
-        public byte[] DataRead { get ; set; }
-        public byte[] ReadBlock()
-        {
-            var bytes = CardIo.ReadCardBlock(Block, KeyType, KeySlot);
-            textBlockStatus.Text = CardIo.StatusText;
-            textBlockSubStatus.Text = CardIo.SubStatusText;
-            return bytes;
-        }
-        private byte[] GetBytes(bool isChecked, TextBox textBox, int length)
-        {
-            textBlockStatus.Text = "";
-            if (isChecked)
-            {
-                var words = textBox.Text.Split(' ');
-                var writeBack = false;
-                if (words.Length > length)
-                {
-                    words = words
-                        .Take(length)
-                        .ToArray();
-                    writeBack = true;
-                }
-                else if (words.Length < length)
-                {
-                    words = words
-                        .Union(
-                            Enumerable.Repeat("00", length - words.Length)
-                        )
-                        .ToArray();
-                    writeBack = true;
-                }
-                var bytes = new byte[length];
-                for (int i = 0; i < words.Length; i++)
-                {
-                    string word = words[i];
-                    if (byte.TryParse(word, NumberStyles.HexNumber, null, out byte result))
-                    {
-                        bytes[i] = result;
-                    }
-                    else
-                    {
-                        textBlockStatus.Text = $"Cannot parse word {i} ({word}).";
-                        return null;
-                    }
-                }
-                if (writeBack)
-                {
-                    textBox.Text = string.Join(" ", words);
-                }
-                return bytes;
-            }
-            else
-            {
-                var text = textBox.Text;
-                if (text.Length < length)
-                {
-                    text += new string('\0', length - text.Length);
-                }
-                else if (text.Length > length)
-                {
-                    text = text.Substring(0, length);
-                    textBox.Text = text;
-                }
-                return text
-                    .ToCharArray()
-                    .Select(c => (byte)c)
-                    .ToArray();
-            }
-        }
-        private void SetBytes(byte[] bytes, TextFormat textFormat, TextBox textBox)
-        {
-            textBox.Text = bytes.Aggregate(
-                "",
-                (s, b) =>
-              {
-                  switch (textFormat)
-                  {
-                      case TextFormat.Hex:
-                          return $"{s}{b:X2} ";
-                      case TextFormat.Stretched:
-                          return $"{s}{(char)b}  ";
-                      case TextFormat.Normal:
-                          return $"{s}{(char)b}";
-                  }
-                  throw new ArgumentException();
-              });
-        }
-
-
-        private void ButtonRead_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                VerifyCard();
-            }
-            catch(Exception ex)
-            {
-                textBlockStatus.Text = ex.Message;
-            }
-        }
-
-        public void VerifyCard()
-        {
-            if (ConnectCard1())
-            {
-                DataRead = ReadBlock() ?? new byte[0];
-                SetBytes(DataRead, TextFormat.Hex, textBoxHex);
-                SetBytes(DataRead, TextFormat.Stretched, textBoxText);
-            }
-        }
-
-
-        private void ButtonWrite_Click(object sender, RoutedEventArgs e)
-        {
-            if (ConnectCard1())// establish connection to the card: you've declared this from previous post
-            {
-                WriteBlock();
-            }
-        }
-
-        private void WriteBlock()
-        {
-            CardIo.WriteCardBlock(Data, Block, KeyType, KeySlot);
-            DisplayStatus();
-        }
-
+        
+       
         private void DisplayStatus(string statusText = null, string subStatusText = null)
         {
             textBlockStatus.Text = statusText ?? CardIo.StatusText;
-            textBlockSubStatus.Text =
-                subStatusText ?? (statusText == null
-                        ? CardIo.SubStatusText
-                        : "");
         }
 
-        private void ButtonStoreKey_Click(object sender, RoutedEventArgs e)
-        {
-            StoreKey();
-        }
-
-        private void StoreKey()
-        {
-            var k = Key;
-            if (k == null)
-                return;
-            CardIo.StoreKey(k, KeySlot);
-            textBlockStatus.Text = CardIo.StatusText;
-            textBlockSubStatus.Text = CardIo.SubStatusText;
-        }
-
-
-        private void ToggleHex_Click(object sender, RoutedEventArgs e)
-        {
-            var isKey = sender == this.toggleHexKey;
-
-            TextBox textBox = 
-                isKey
-                    ? textBoxKey
-                    : textBoxData;
-            var toggle =
-                isKey
-                    ? toggleHexKey
-                    : toggleHexData;
-
-            var wasHex = toggle.IsChecked == false;
-            var data = GetBytes(
-                wasHex,
-                textBox,
-                isKey
-                    ? 6
-                    : 16);
-            if (data == null)
-            {
-                toggle.IsChecked = wasHex;
-                return;
-            }
-            if (wasHex)
-            {
-                var chars = data.Select(b => (char)b).ToArray();
-                textBox.Text = new string(chars);
-            }
-            else
-            {
-                var words = data.Select(b => b.ToString("X2"));
-                textBox.Text = string.Join(" ", words);
-            }
-        }
-
-        private void ToggleKeyTypeB_Click(object sender, RoutedEventArgs e)
-        {
-            toggleKeyTypeB.Content =
-                toggleKeyTypeB.IsChecked == true
-                ? "Key Type B"
-                : "Key Type A";
-        }
-
-        private void TextBoxData_TextChanged(object sender, TextChangedEventArgs e)
-        {
-
-        }
 
         private void CardIo_ReaderStateChanged(CardIo.ReaderState readerState)
         {
@@ -309,25 +178,6 @@ namespace CardTest
                 Dispatcher.Invoke(() => CardIo_ReaderStateChanged(readerState));
                 return;
             }
-            textBlockReaderState.Text = readerState.ToString();
-        }
-
-        private void ToggleKeySlot1_Click(object sender, RoutedEventArgs e)
-        {
-            toggleKeySlot1.Content =
-                toggleKeySlot1.IsChecked == true
-                ? "Key Slot 1"
-                : "Key Slot 0";
-        }
-
-        private void ButtonCopy_Click(object sender, RoutedEventArgs e)
-        {
-            Data = DataRead;
-        }
-
-        private void ButtonCheck_Click(object sender, RoutedEventArgs e)
-        {
-
         }
     }
 }
